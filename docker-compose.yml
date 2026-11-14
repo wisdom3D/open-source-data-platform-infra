@@ -1,0 +1,261 @@
+# ==============================================================================
+# Open Source Data Platform - Infrastructure Docker Compose
+# Services: PostgreSQL 16, Apache Airflow 2.9.2 (LocalExecutor + dbt), Apache Superset 4.0.1
+# Sizing target: 4 vCPU / 8 GB+ RAM VPS
+# ==============================================================================
+
+version: "3.8"
+
+x-airflow-common: &airflow-common
+  build:
+    context: ./airflow
+    dockerfile: Dockerfile
+  user: "${AIRFLOW_UID:-50000}:0"
+  env_file:
+    - .env
+  environment:
+    # Execution Architecture: LocalExecutor (low memory footprint, no Redis/Celery needed)
+    AIRFLOW__CORE__EXECUTOR: LocalExecutor
+    # Database connections
+    AIRFLOW__CORE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB:-airflow_backend}
+    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${AIRFLOW_DB_USER:-airflow}:${AIRFLOW_DB_PASSWORD:-airflow}@postgres:5432/${AIRFLOW_DB:-airflow_backend}
+    # Security keys
+    AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW__CORE__FERNET_KEY}
+    AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW__WEBSERVER__SECRET_KEY}
+    # Reverse Proxy & Domain settings
+    AIRFLOW__WEBSERVER__BASE_URL: https://${AIRFLOW_DOMAIN:-elt.example.com}
+    AIRFLOW__WEBSERVER__ENABLE_PROXY_FIX: "true"
+    # Operational behaviors
+    AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+    AIRFLOW__CORE__LOAD_DEFAULT_CONNECTIONS: "false"
+    AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: "true"
+    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
+    # dbt execution context forwarded to BashOperator
+    DBT_PROD_HOST: postgres
+    DBT_PROD_PORT: 5432
+    DBT_PROD_DB: ${ANALYTICS_PROD_DB:-analytics_prod}
+    DBT_DB_USER: ${DBT_DB_USER:-dbt_runner}
+    DBT_DB_PASSWORD: ${DBT_DB_PASSWORD:-dbt_runner_pass}
+    DBT_PROD_SCHEMA: ${DBT_PROD_SCHEMA:-public}
+    DBT_PROFILES_DIR: /opt/airflow/dbt_project
+  volumes:
+    - ./airflow/dags:/opt/airflow/dags
+    - ./airflow/logs:/opt/airflow/logs
+    - ${DBT_PROJECT_HOST_PATH:-/opt/dbt-analytics}:/opt/airflow/dbt_project
+  networks:
+    - data_platform_net
+
+x-superset-common: &superset-common
+  build:
+    context: ./superset
+    dockerfile: Dockerfile
+  env_file:
+    - .env
+  environment:
+    SUPERSET_SECRET_KEY: ${SUPERSET_SECRET_KEY}
+    SUPERSET_CONFIG_PATH: /app/pythonpath/superset_config.py
+    PYTHONPATH: /app/pythonpath
+    SUPERSET_SQLALCHEMY_DATABASE_URI: postgresql+psycopg2://${SUPERSET_DB_USER:-superset}:${SUPERSET_DB_PASSWORD:-superset}@postgres:5432/${SUPERSET_DB:-superset}
+    SUPERSET_ROW_LIMIT: ${SUPERSET_ROW_LIMIT:-50000}
+  volumes:
+    - ./superset/superset_config.py:/app/pythonpath/superset_config.py:ro
+    - superset_home:/app/superset_home
+  networks:
+    - data_platform_net
+
+services:
+  # ============================================================================
+  # 1. POSTGRESQL 16 (Multi-database repository)
+  # ============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: data_platform_postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-postgres}
+      # Database and role init variables passed to 01-init-dbs.sh
+      AIRFLOW_DB: ${AIRFLOW_DB:-airflow_backend}
+      AIRFLOW_DB_USER: ${AIRFLOW_DB_USER:-airflow}
+      AIRFLOW_DB_PASSWORD: ${AIRFLOW_DB_PASSWORD}
+      SUPERSET_DB: ${SUPERSET_DB:-superset}
+      SUPERSET_DB_USER: ${SUPERSET_DB_USER:-superset}
+      SUPERSET_DB_PASSWORD: ${SUPERSET_DB_PASSWORD}
+      ANALYTICS_STAGING_DB: ${ANALYTICS_STAGING_DB:-analytics_staging}
+      ANALYTICS_PROD_DB: ${ANALYTICS_PROD_DB:-analytics_prod}
+      DBT_DB_USER: ${DBT_DB_USER:-dbt_runner}
+      DBT_DB_PASSWORD: ${DBT_DB_PASSWORD}
+    ports:
+      # Bound strictly to loopback 127.0.0.1 on POSTGRES_HOST_PORT (default: 5433)
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-scripts:/docker-entrypoint-initdb.d:ro
+      - ./sql:/docker-entrypoint-initdb.d/sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2048M
+    networks:
+      - data_platform_net
+
+  # ============================================================================
+  # 2. APACHE AIRFLOW (Database Migrations & Initial Admin Creation)
+  # ============================================================================
+  airflow-init:
+    <<: *airflow-common
+    container_name: data_platform_airflow_init
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "=== [AIRFLOW-INIT] Running database schema migrations ==="
+        airflow db migrate
+        echo "=== [AIRFLOW-INIT] Creating administrative user ==="
+        airflow users create \
+          --username "${_AIRFLOW_WWW_USER_USERNAME:-admin}" \
+          --password "${_AIRFLOW_WWW_USER_PASSWORD:-admin}" \
+          --firstname "${_AIRFLOW_WWW_USER_FIRSTNAME:-Platform}" \
+          --lastname "${_AIRFLOW_WWW_USER_LASTNAME:-Admin}" \
+          --role Admin \
+          --email "${_AIRFLOW_WWW_USER_EMAIL:-admin@example.com}" || true
+        echo "=== [AIRFLOW-INIT] Initialization complete ==="
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ============================================================================
+  # 3. APACHE AIRFLOW WEBSERVER
+  # ============================================================================
+  airflow-webserver:
+    <<: *airflow-common
+    container_name: data_platform_airflow_webserver
+    restart: unless-stopped
+    command: webserver
+    ports:
+      # Bound strictly to loopback 127.0.0.1 for reverse proxying or SSH tunnel
+      - "127.0.0.1:${AIRFLOW_HOST_PORT:-8080}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1024M
+
+  # ============================================================================
+  # 4. APACHE AIRFLOW SCHEDULER (LocalExecutor)
+  # ============================================================================
+  airflow-scheduler:
+    <<: *airflow-common
+    container_name: data_platform_airflow_scheduler
+    restart: unless-stopped
+    command: scheduler
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname \"$${HOSTNAME}\""]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2048M
+
+  # ============================================================================
+  # 5. APACHE SUPERSET INITIALIZATION
+  # ============================================================================
+  superset-init:
+    <<: *superset-common
+    container_name: data_platform_superset_init
+    user: "root"
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - |
+        echo "=== [SUPERSET-INIT] Setting up workspace permissions ==="
+        chown -R superset:superset /app/superset_home
+        echo "=== [SUPERSET-INIT] Upgrading Superset Metadata DB ==="
+        su superset -c "superset db upgrade"
+        echo "=== [SUPERSET-INIT] Creating administrative user ==="
+        su superset -c "superset fab create-admin \
+          --username '${SUPERSET_ADMIN_USERNAME:-admin}' \
+          --firstname '${SUPERSET_ADMIN_FIRSTNAME:-Superset}' \
+          --lastname '${SUPERSET_ADMIN_LASTNAME:-Admin}' \
+          --email '${SUPERSET_ADMIN_EMAIL:-admin@example.com}' \
+          --password '${SUPERSET_ADMIN_PASSWORD:-admin}'" || true
+        echo "=== [SUPERSET-INIT] Initializing default roles and permissions ==="
+        su superset -c "superset init"
+        echo "=== [SUPERSET-INIT] Superset initialization complete ==="
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  # ============================================================================
+  # 6. APACHE SUPERSET WEBSERVER
+  # ============================================================================
+  superset:
+    <<: *superset-common
+    container_name: data_platform_superset
+    restart: unless-stopped
+    command: ["/usr/bin/run-server.sh"]
+    ports:
+      # Bound strictly to loopback 127.0.0.1 for reverse proxying or SSH tunnel
+      - "127.0.0.1:${SUPERSET_HOST_PORT:-8088}:8088"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      superset-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://localhost:8088/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2048M
+
+# ==============================================================================
+# VOLUMES & NETWORKS
+# ==============================================================================
+volumes:
+  postgres_data:
+    driver: local
+  superset_home:
+    driver: local
+
+networks:
+  data_platform_net:
+    driver: bridge
+    name: data_platform_net

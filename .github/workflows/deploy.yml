@@ -1,0 +1,81 @@
+# ==============================================================================
+# GitHub Actions - Continuous Deployment to VPS via SSH
+# ==============================================================================
+name: Deploy Infrastructure to VPS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: production-deployment
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Sync and Deploy Infrastructure on VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Deploy via SSH to VPS
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT || 22 }}
+          script_stop: true
+          script: |
+            set -e
+
+            DEPLOY_PATH="${{ secrets.VPS_DEPLOY_PATH || '/opt/open-source-data-platform-infra' }}"
+            DBT_PATH="${{ secrets.VPS_DBT_PATH || '/opt/dbt-analytics' }}"
+
+            echo ">>> [1/6] Navigating to deployment directory: $DEPLOY_PATH"
+            if [ ! -d "$DEPLOY_PATH" ]; then
+              echo "Deployment directory $DEPLOY_PATH does not exist. Initializing clone..."
+              sudo mkdir -p "$DEPLOY_PATH"
+              sudo chown -R $USER:$USER "$DEPLOY_PATH"
+              git clone https://github.com/${{ github.repository }}.git "$DEPLOY_PATH"
+            fi
+
+            cd "$DEPLOY_PATH"
+
+            echo ">>> [2/6] Synchronizing Git repository with branch main..."
+            git fetch origin main
+            git reset --hard origin/main
+
+            echo ">>> [3/6] Verifying environment configuration (.env)..."
+            if [ ! -f .env ]; then
+              echo "CRITICAL: .env file not found in $DEPLOY_PATH!"
+              echo "Please copy .env.example to .env and configure secrets before first deploy."
+              exit 1
+            fi
+
+            echo ">>> [4/6] Ensuring dbt project mount directory exists ($DBT_PATH)..."
+            if [ ! -d "$DBT_PATH" ]; then
+              echo "Notice: Creating directory $DBT_PATH for external dbt repo mounting..."
+              sudo mkdir -p "$DBT_PATH"
+              # Ensure readable/executable by Airflow UID 50000
+              sudo chmod 755 "$DBT_PATH"
+            fi
+
+            echo ">>> [5/6] Building custom images and starting services with Docker Compose..."
+            docker compose pull postgres || true
+            docker compose build --pull
+            docker compose up -d --remove-orphans
+
+            echo ">>> [6/6] Verifying running services status..."
+            sleep 10
+            docker compose ps
+
+            echo "Cleaning dangling images..."
+            docker image prune -f
+
+            echo ">>> Deployment successfully completed!"
+

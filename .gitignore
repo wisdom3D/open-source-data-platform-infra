@@ -1,0 +1,62 @@
+# ==============================================================================
+# Git Ignore - open-source-data-platform-infra (Public Open-Source Template)
+# ==============================================================================
+
+# Environment variables & secrets (CRITICAL: NEVER COMMIT SECRETS)
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+
+# Generated Nginx configurations from templates
+nginx/*.conf
+!nginx/*.template
+
+# Python & Bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+ENV/
+
+# Airflow runtime, logs & temporary config
+airflow/logs/
+airflow/*.pid
+airflow/airflow.cfg
+airflow/airflow.db
+airflow/webserver_config.py
+
+# Superset runtime & SQLite fallbacks
+superset/superset_home/
+superset/*.db
+superset/*.sqlite
+
+# dbt compilation & local artifacts
+target/
+dbt_packages/
+dbt_modules/
+logs/
+
+# Operating System files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+[Dd]esktop.ini
+
+# IDE & Editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
