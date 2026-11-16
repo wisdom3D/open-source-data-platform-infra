@@ -315,10 +315,10 @@ sudo certbot --nginx -d "${AIRFLOW_DOMAIN}" -d "${SUPERSET_DOMAIN}"
 
 #### Étape 5 : Configurer les Accès Tunnel SSH Sécurisés
 
-Le script [scripts/setup_ssh_users.sh](scripts/setup_ssh_users.sh) provisionne automatiquement les comptes utilisateurs restreints :
+Rendez les scripts d'administration exécutables et lancez le provisionnement des utilisateurs :
 
 ```bash
-sudo chmod +x scripts/setup_ssh_users.sh
+chmod +x scripts/setup_ssh_users.sh scripts/create_db_user.sh
 
 # Créer un ou plusieurs comptes pour l'équipe Data
 sudo ./scripts/setup_ssh_users.sh <utilisateur_1> <utilisateur_2>
@@ -373,9 +373,9 @@ ssh -N -L 5433:127.0.0.1:5433 <utilisateur>@<VOTRE_IP_VPS> -i ~/.ssh/id_ed25519_
 *(Le flag `-N` empêche l'allocation d'un shell, respectant la restriction de sécurité `/bin/false`).*
 
 Dans votre client SQL local :
-- **Hôte :** `127.0.0.1` ou `localhost`
+- **Hôte :** **`127.0.0.1`** (⚠️ *Ne JAMAIS utiliser `localhost`, car sa résolution en IPv6 `::1` est rejetée par la règle SSH `PermitOpen`*)
 - **Port :** `5433` (ou la valeur de `${POSTGRES_HOST_PORT}`)
-- **Base :** `analytics_prod`
+- **Base :** `analytics_staging` (pour votre sandbox `<username>_dev`) ou `analytics_prod`
 - **Utilisateur :** `<identifiant_sql>` (créé via `./scripts/create_db_user.sh`)
 - **Mot de passe :** `[votre_mot_de_passe]`
 

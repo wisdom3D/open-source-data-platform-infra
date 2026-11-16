@@ -87,6 +87,10 @@ echo "  Host: $(hostname -f 2>/dev/null || hostname)"
 echo "  Directory: $PROJECT_ROOT"
 echo "========================================================================"
 
+# Ensure administration scripts are executable
+chmod +x scripts/setup_ssh_users.sh scripts/create_db_user.sh scripts/setup_env.sh deploy.sh 2>/dev/null || true
+log_info "Ensured execute permissions on admin scripts (chmod +x scripts/*.sh)"
+
 # ------------------------------------------------------------------------------
 # STEP 1: PREPARE EXTERNAL DBT DIRECTORY AND PERMISSIONS
 # ------------------------------------------------------------------------------
@@ -249,13 +253,16 @@ echo -e "  \033[1;37msudo certbot --nginx -d ${AIRFLOW_DOMAIN} -d ${SUPERSET_DOM
 echo ""
 echo "========================================================================"
 echo "👉 USER & ANALYST ONBOARDING:"
-echo "  1. Provision an SSH Tunnel account:"
+echo "  1. Admin scripts made executable:"
+echo "       chmod +x scripts/setup_ssh_users.sh scripts/create_db_user.sh"
+echo ""
+echo "  2. Provision an SSH Tunnel account:"
 echo "       sudo ./scripts/setup_ssh_users.sh <username>"
 echo ""
-echo "  2. Create PostgreSQL user with Medallion RBAC & personal sandbox:"
+echo "  3. Create PostgreSQL user with Medallion RBAC & personal sandbox:"
 echo "       ./scripts/create_db_user.sh <username> role_analyst"
 echo ""
-echo "  3. Guide user to configure DBeaver via SSH tunnel:"
+echo "  4. Guide user to configure DBeaver (Host MUST be 127.0.0.1, NOT localhost):"
 echo "       👉 docs/dbeaver-ssh-onboarding.md"
 echo "========================================================================"
 echo ""
